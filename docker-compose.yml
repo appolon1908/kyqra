@@ -18,11 +18,11 @@ services:
       dockerfile: Dockerfile
     restart: unless-stopped
     environment:
-      REDIS_URL: ${REDIS_URL}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379}
+      STATE_DB: /app/storage/kyqra.db
       API_KEY: ${API_KEY}
-      CALLBACK_SECRET: ${CALLBACK_SECRET}
-      MIDDLEWARE_BASE_URL: ${MIDDLEWARE_BASE_URL}
-      MIDDLEWARE_IP: ${MIDDLEWARE_IP}
+      ADMIN_API_KEY: ${ADMIN_API_KEY}
+      TENANT_API_KEYS_JSON: ${TENANT_API_KEYS_JSON}
       PORT: ${CRAWLER_PORT:-3000}
     depends_on:
       redis:
@@ -33,6 +33,53 @@ services:
       - crawler_storage:/app/storage
     shm_size: "2gb"
     networks: [kyqra]
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/api/v1/health').then(r=>{if(!r.ok)process.exit(1)})"]
+      interval: 20s
+      timeout: 5s
+      retries: 5
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+
+  crawler-worker:
+    build: .
+    command: ["npm", "run", "worker:crawler"]
+    restart: unless-stopped
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379}
+      STATE_DB: /app/storage/kyqra.db
+    depends_on:
+      redis: { condition: service_healthy }
+    volumes: [crawler_storage:/app/storage]
+    shm_size: "2gb"
+    networks: [kyqra]
+    deploy:
+      resources:
+        limits: { memory: 3G }
+
+  outbox-worker:
+    build: .
+    command: ["npm", "run", "worker:outbox"]
+    restart: unless-stopped
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      STATE_DB: /app/storage/kyqra.db
+      MIDDLEWARE_BASE_URL: ${MIDDLEWARE_BASE_URL:-https://10.40.0.1:443}
+      MIDDLEWARE_EVENTS_PATH: ${MIDDLEWARE_EVENTS_PATH:-/api/v1/events/kyqra}
+      KYQRA_MIDDLEWARE_API_KEY: ${KYQRA_MIDDLEWARE_API_KEY}
+      KYQRA_MIDDLEWARE_HMAC_SECRET: ${KYQRA_MIDDLEWARE_HMAC_SECRET}
+    volumes: [crawler_storage:/app/storage]
+    networks: [kyqra]
+    deploy:
+      resources:
+        limits: { memory: 512M }
 
 networks:
   kyqra:

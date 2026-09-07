@@ -33,6 +33,21 @@ No runtime traffic is moved by this documentation change. Any production cutover
 requires contract/source parity, backup/restore evidence, queue drain, callback cutover,
 immutable deployment, read-back and rollback rehearsal.
 
+## Historical control-plane alignment
+
+PR #2 preserves the earlier tenant-scoped job API, Redis scheduling, Crawlee/Playwright
+worker, and SQLite outbox implementation for migration review. The legacy
+`/api/v1/crawl` and `/api/v1/jobs` routes are historical interfaces, not a new production
+API authority. New integrations and production fixes belong in `kyqra-crawler`.
+
+The associated [event model](docs/EVENT_MODEL.md),
+[middleware integration](docs/MIDDLEWARE_INTEGRATION.md),
+[retry and DLQ](docs/RETRY_DLQ.md), [security](docs/SECURITY.md), and
+[operations](docs/OPERATIONS.md) documents describe that historical implementation.
+The [deployment report](DEPLOYMENT_REPORT.md) records unverified activation blockers;
+merging the source does not authorize runtime deployment, live crawling, callback
+replay, secret provisioning, or downstream delivery.
+
 ## Historical quick start
 
 The historical Compose source remains available for reference:

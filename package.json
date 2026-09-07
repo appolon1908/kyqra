@@ -4,12 +4,19 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "start": "node src/server.js"
+    "start": "node src/server.js",
+    "worker:crawler": "node src/crawler-worker.js",
+    "worker:outbox": "node src/outbox-worker.js",
+    "test": "node --test",
+    "check": "set -eu; for f in src/*.js test/*.js; do node --check \"$f\"; done"
   },
   "dependencies": {
+    "better-sqlite3": "^11.8.1",
+    "bullmq": "^5.34.10",
     "crawlee": "latest",
     "express": "latest",
     "ioredis": "latest",
+    "pino": "^9.6.0",
     "playwright": "latest"
   }
 }

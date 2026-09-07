@@ -1,50 +1,35 @@
 import express from 'express';
+import { Queue } from 'bullmq';
+import IORedis from 'ioredis';
 import { PlaywrightCrawler } from 'crawlee';
+import { randomUUID, timingSafeEqual } from 'node:crypto';
+import { config } from './config.js';
+import { db, addEvent, envelope, audit, tenantJob, parse } from './store.js';
 
-const app = express();
-app.use(express.json());
-
-const port = Number(process.env.PORT || 3000);
-const apiKey = process.env.API_KEY || '';
-
-function requireApiKey(req, res, next) {
-  if (!apiKey || req.header('x-api-key') !== apiKey) {
-    return res.status(401).json({ error: 'unauthorized' });
-  }
-  next();
-}
-
-app.get('/health', (_req, res) => {
-  res.json({ ok: true, service: 'kyqra-crawler' });
-});
-
-app.post('/api/v1/crawl', requireApiKey, async (req, res) => {
-  const { startUrls = [], maxRequestsPerCrawl = 25 } = req.body || {};
-  if (!Array.isArray(startUrls) || startUrls.length === 0) {
-    return res.status(400).json({ error: 'startUrls must be a non-empty array' });
-  }
-
-  const results = [];
-  const crawler = new PlaywrightCrawler({
-    maxRequestsPerCrawl: Number(maxRequestsPerCrawl),
-    maxConcurrency: 3,
-    requestHandlerTimeoutSecs: 60,
-    async requestHandler({ request, page, enqueueLinks }) {
-      const title = await page.title();
-      const text = await page.locator('body').innerText().catch(() => '');
-      results.push({ url: request.loadedUrl || request.url, title, text: text.slice(0, 5000) });
-      await enqueueLinks({ strategy: 'same-domain' });
-    }
-  });
-
-  try {
-    await crawler.run(startUrls);
-    res.json({ ok: true, count: results.length, results });
-  } catch (error) {
-    res.status(500).json({ ok: false, error: error?.message || 'crawl failed' });
-  }
-});
-
-app.listen(port, '0.0.0.0', () => {
-  console.log(`kyqra crawler listening on ${port}`);
-});
+const app=express(); app.use(express.json({limit:'1mb'}));
+const redis=new IORedis(config.redis,{maxRetriesPerRequest:null}); const queue=new Queue('crawler-jobs',{connection:redis});
+const keys=(()=>{try{return JSON.parse(process.env.TENANT_API_KEYS_JSON||'{}')}catch{return {}}})();
+const equal=(a,b)=>{const x=Buffer.from(a||''),y=Buffer.from(b||'');return x.length===y.length&&timingSafeEqual(x,y)};
+function requestContext(req,res,next){req.requestId=req.header('x-request-id')||randomUUID();req.correlationId=req.header('x-correlation-id')||randomUUID();res.set({'x-request-id':req.requestId,'x-correlation-id':req.correlationId});next()}
+function auth(req,res,next){const supplied=req.header('x-api-key')||'';const tenant=keys[supplied]||(process.env.API_KEY&&equal(supplied,process.env.API_KEY)?req.header('x-tenant-id'):null);if(!tenant)return error(res,401,'unauthorized','Valid tenant API key required');req.tenantId=tenant;next()}
+function admin(req,res,next){if(!process.env.ADMIN_API_KEY||!equal(req.header('x-api-key'),process.env.ADMIN_API_KEY))return error(res,403,'forbidden','Admin authorization required');next()}
+function error(res,status,code,message,details={}){return res.status(status).json({error:{code,message,details,request_id:res.getHeader('x-request-id')}})}
+app.use(requestContext);
+app.get('/health',(_q,r)=>r.json({ok:true,service:'kyqra-crawler'}));
+app.get('/api/v1/health',async(_q,r)=>{let redisOk=true;try{await redis.ping()}catch{redisOk=false}const integration=db.prepare("SELECT * FROM integration_state WHERE name='middleware'").get();r.status(redisOk?200:503).json({status:redisOk?'healthy':'degraded',crawler:{database:true,queue:redisOk},middleware:{status:integration.state,last_success_at:integration.last_success_at,last_failure_at:integration.last_failure_at}})});
+app.get('/api/v1/ready',async(_q,r)=>{try{await redis.ping();db.prepare('SELECT 1').get();r.json({status:'ready'})}catch(e){error(r,503,'not_ready',e.message)}});
+app.post('/api/v1/jobs',auth,async(req,res)=>{const {startUrls=[],maxRequestsPerCrawl=25,customer_id=null}=req.body||{};if(!Array.isArray(startUrls)||!startUrls.length)return error(res,400,'invalid_start_urls','startUrls must be non-empty');const idem=req.header('idempotency-key');if(!idem)return error(res,400,'missing_idempotency_key','Idempotency-Key is required');const prior=db.prepare('SELECT * FROM jobs WHERE tenant_id=? AND idempotency_key=?').get(req.tenantId,idem);if(prior)return res.status(200).json(parse(prior));const job_id=randomUUID(),now=new Date().toISOString(),ctx={job_id,tenant_id:req.tenantId,customer_id,request_id:req.requestId,correlation_id:req.correlationId};db.transaction(()=>{db.prepare('INSERT INTO jobs VALUES(?,?,?,?,?,?,?,?,?,?,?,NULL)').run(job_id,req.tenantId,customer_id,req.requestId,req.correlationId,idem,'accepted',JSON.stringify(startUrls),Math.min(Number(maxRequestsPerCrawl)||25,1000),now,now);addEvent(envelope('crawler.job.accepted',ctx,{start_urls:startUrls,max_requests:Math.min(Number(maxRequestsPerCrawl)||25,1000)}));audit(req.tenantId,'api-key','job.created',job_id,req.correlationId)})();await queue.add('crawl',ctx,{jobId:job_id,removeOnComplete:100,removeOnFail:100,attempts:1});res.status(202).json({job_id,status:'accepted',request_id:req.requestId,correlation_id:req.correlationId})});
+app.get('/api/v1/jobs',auth,(req,res)=>{const rows=db.prepare('SELECT * FROM jobs WHERE tenant_id=? ORDER BY created_at DESC LIMIT ?').all(req.tenantId,Math.min(Number(req.query.limit)||100,500));res.json({items:rows.map(parse)})});
+app.get('/api/v1/jobs/:id',auth,(req,res)=>{const row=tenantJob(req.tenantId,req.params.id);return row?res.json(parse(row)):error(res,404,'not_found','Job not found')});
+app.get('/api/v1/jobs/:id/results',auth,(req,res)=>{if(!tenantJob(req.tenantId,req.params.id))return error(res,404,'not_found','Job not found');res.json({items:db.prepare('SELECT * FROM results WHERE tenant_id=? AND job_id=? ORDER BY created_at').all(req.tenantId,req.params.id).map(parse)})});
+app.post('/api/v1/jobs/:id/cancel',auth,async(req,res)=>{const job=tenantJob(req.tenantId,req.params.id);if(!job)return error(res,404,'not_found','Job not found');await queue.remove(req.params.id).catch(()=>{});db.prepare("UPDATE jobs SET status='cancelled',updated_at=? WHERE tenant_id=? AND job_id=?").run(new Date().toISOString(),req.tenantId,req.params.id);addEvent(envelope('crawler.job.cancelled',job,{reason:req.body?.reason||'requested'}));audit(req.tenantId,'api-key','job.cancelled',job.job_id,job.correlation_id);res.json({job_id:job.job_id,status:'cancelled'})});
+app.post('/api/v1/jobs/:id/retry',auth,async(req,res)=>{const job=tenantJob(req.tenantId,req.params.id);if(!job)return error(res,404,'not_found','Job not found');if(!['failed','cancelled'].includes(job.status))return error(res,409,'invalid_state','Only failed or cancelled jobs can be retried');db.prepare("UPDATE jobs SET status='accepted',error=NULL,updated_at=? WHERE job_id=?").run(new Date().toISOString(),job.job_id);await queue.add('crawl',job,{jobId:`${job.job_id}:retry:${Date.now()}`,attempts:1});audit(req.tenantId,'api-key','job.retried',job.job_id,job.correlation_id);res.status(202).json({job_id:job.job_id,status:'accepted'})});
+app.get('/api/v1/stats',auth,(req,res)=>{const jobs=db.prepare('SELECT status,count(*) count FROM jobs WHERE tenant_id=? GROUP BY status').all(req.tenantId);const results=db.prepare('SELECT duplicate_status,count(*) count FROM results WHERE tenant_id=? GROUP BY duplicate_status').all(req.tenantId);res.json({jobs:Object.fromEntries(jobs.map(x=>[x.status,x.count])),results:Object.fromEntries(results.map(x=>[x.duplicate_status,x.count]))})});
+app.get('/metrics',(_req,res)=>{const counts=db.prepare('SELECT state,count(*) n FROM outbox GROUP BY state').all();const circuit=db.prepare("SELECT state FROM integration_state WHERE name='middleware'").get();const lines=['# TYPE kyqra_outbox_events gauge',...counts.map(x=>`kyqra_outbox_events{state="${x.state}"} ${x.n}`),'# TYPE kyqra_middleware_circuit_open gauge',`kyqra_middleware_circuit_open ${circuit.state==='open'?1:0}`];res.type('text/plain').send(lines.join('\n')+'\n')});
+app.get('/api/v1/admin/integration',admin,(_q,res)=>{const integration=db.prepare("SELECT * FROM integration_state WHERE name='middleware'").get(),states=db.prepare('SELECT state,count(*) count FROM outbox GROUP BY state').all(),events=db.prepare("SELECT event_id,event_type,job_id,correlation_id,state,attempts,last_error,next_attempt_at,created_at,delivered_at FROM outbox ORDER BY created_at DESC LIMIT 100").all();res.json({private_endpoint:config.middlewareUrl,integration,outbox:Object.fromEntries(states.map(x=>[x.state,x.count])),events})});
+app.post('/api/v1/admin/integration/events/:id/replay',admin,(req,res)=>{const row=db.prepare("SELECT * FROM outbox WHERE event_id=? AND state='dead-lettered'").get(req.params.id);if(!row)return error(res,409,'not_dead_lettered','Event is not dead-lettered');db.prepare("UPDATE outbox SET state='pending',attempts=0,next_attempt_at=0,last_error=NULL WHERE event_id=?").run(req.params.id);audit(row.tenant_id,'admin','outbox.manual_replay',row.event_id,row.correlation_id,{request_id:req.requestId});res.json({queued:true,event_id:row.event_id})});
+app.get('/admin/integration',(_q,res)=>res.type('html').send(`<!doctype html><meta name="viewport" content="width=device-width"><title>Kyqra Integration Operations</title><style>body{font:14px system-ui;margin:2rem;background:#0b1020;color:#e8ecf4}input,button{padding:.6rem}table{border-collapse:collapse;width:100%;margin-top:1rem}td,th{padding:.55rem;border-bottom:1px solid #334;text-align:left}.ok{color:#72e6a1}.bad{color:#ff8080}</style><h1>Integration Operations</h1><p>Admin key <input id=k type=password><button onclick=load()>Refresh</button></p><div id=s></div><table><thead><tr><th>Event</th><th>Job / correlation</th><th>State</th><th>Attempts</th><th>Error</th><th></th></tr></thead><tbody id=t></tbody></table><script>async function load(){let k=document.querySelector('#k').value,r=await fetch('/api/v1/admin/integration',{headers:{'x-api-key':k}}),d=await r.json();if(!r.ok){s.textContent=d.error?.message||'Failed';return}s.innerHTML='<b class="'+(d.integration.state==='closed'?'ok':'bad')+'">Middleware '+d.integration.state+'</b> · '+d.private_endpoint+' · pending '+(d.outbox.pending||0)+' · retrying '+(d.outbox.retrying||0)+' · DLQ '+(d.outbox['dead-lettered']||0)+' · last success '+(d.integration.last_success_at||'never')+' · last failure '+(d.integration.last_failure_at||'never');t.innerHTML=d.events.map(e=>'<tr><td>'+e.event_type+'<br><small>'+e.event_id+'</small></td><td>'+(e.job_id||'—')+'<br><small>'+e.correlation_id+'</small></td><td>'+e.state+'</td><td>'+e.attempts+'</td><td>'+(e.last_error||'')+'</td><td>'+(e.state==='dead-lettered'?'<button onclick="replay(\''+e.event_id+'\')">Replay</button>':'')+'</td></tr>').join('')}async function replay(id){await fetch('/api/v1/admin/integration/events/'+id+'/replay',{method:'POST',headers:{'x-api-key':k.value,'content-type':'application/json'},body:'{}'});load()}</script>`));
+// Exact legacy synchronous contract retained for existing callers.
+app.post('/api/v1/crawl',auth,async(req,res)=>{const {startUrls=[],maxRequestsPerCrawl=25}=req.body||{};if(!Array.isArray(startUrls)||!startUrls.length)return res.status(400).json({error:'startUrls must be a non-empty array'});const results=[];const crawler=new PlaywrightCrawler({maxRequestsPerCrawl:Number(maxRequestsPerCrawl),maxConcurrency:3,requestHandlerTimeoutSecs:60,async requestHandler({request,page,enqueueLinks}){const title=await page.title();const text=await page.locator('body').innerText().catch(()=>'');results.push({url:request.loadedUrl||request.url,title,text:text.slice(0,5000)});await enqueueLinks({strategy:'same-domain'})}});try{await crawler.run(startUrls);res.json({ok:true,count:results.length,results})}catch(e){res.status(500).json({ok:false,error:e?.message||'crawl failed'})}});
+app.use((q,r)=>error(r,404,'not_found','Route not found'));
+app.listen(Number(process.env.PORT||3000),'0.0.0.0');

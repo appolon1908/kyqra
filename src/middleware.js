@@ -1,0 +1,7 @@
+import { createHmac } from 'node:crypto';
+import { config } from './config.js';
+
+export function canonicalBody(event) { return Buffer.from(JSON.stringify(event)); }
+export function signature(secret, timestamp, eventId, body) { return createHmac('sha256',secret).update(`${timestamp}\n${eventId}\nkyqra\n`).update(body).digest('hex'); }
+export function signedHeaders(event, body, timestamp=String(Math.floor(Date.now()/1000))) { return { 'content-type':'application/json','authorization':`Bearer ${config.apiKey}`,'idempotency-key':event.idempotency_key,'x-event-id':event.event_id,'x-timestamp':timestamp,'x-signature':`sha256=${signature(config.hmacSecret,timestamp,event.event_id,body)}`,'x-kyqra-timestamp':timestamp,'x-kyqra-event-id':event.event_id,'x-kyqra-correlation-id':event.correlation_id,'x-kyqra-signature':`sha256=${signature(config.hmacSecret,timestamp,event.event_id,body)}` }; }
+export async function deliver(event, fetcher=fetch) { if(!config.apiKey || !config.hmacSecret) throw new Error('middleware_credentials_unavailable'); const body=canonicalBody(event); const response=await fetcher(config.middlewareUrl,{method:'POST',headers:signedHeaders(event,body),body,signal:AbortSignal.timeout(10000)}); if(!response.ok && response.status!==409) { const text=(await response.text()).slice(0,500); const error=new Error(`middleware_http_${response.status}:${text}`); error.retryable=[408,425,429,500,502,503,504].includes(response.status); throw error; } return response; }

@@ -11,6 +11,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 from typing import Iterable
 
@@ -255,12 +256,21 @@ def run_compose_checks(root: Path) -> None:
     for path in sorted(iter_files(root)):
         if path.name not in names:
             continue
-        command = ["docker", "compose"]
-        env_example = path.parent / ".env.example"
-        if env_example.is_file():
-            command.extend(["--env-file", str(env_example)])
-        command.extend(["-f", str(path), "config", "--quiet"])
-        run(command, cwd=path.parent, timeout=300)
+        # Check the unmodified model in an isolated project directory. Only the
+        # committed example may supply a fixture; never read or create a runtime
+        # .env in the checkout. Real images are built separately from source.
+        with tempfile.TemporaryDirectory(prefix="kyqra-compose-ci-") as temporary:
+            isolated = Path(temporary)
+            compose_file = isolated / path.name
+            shutil.copyfile(path, compose_file)
+            command = ["docker", "compose", "--project-name", "kyqra-ci-validation"]
+            env_example = path.parent / ".env.example"
+            if env_example.is_file():
+                fixture = isolated / ".env"
+                shutil.copyfile(env_example, fixture)
+                command.extend(["--env-file", str(fixture)])
+            command.extend(["-f", str(compose_file), "config", "--quiet"])
+            run(command, cwd=isolated, timeout=300)
 
 
 def run_docker_builds(root: Path, mode: str) -> None:
@@ -275,7 +285,7 @@ def run_docker_builds(root: Path, mode: str) -> None:
                 "build",
                 "--pull=false",
                 "--label",
-                f"org.opencontainers.image.revision={os.environ.get('GITHUB_SHA', 'local')}",
+                f"org.opencontainers.image.revision={os.environ.get('SOURCE_SHA') or os.environ.get('GITHUB_SHA', 'local')}",
                 "-f",
                 str(dockerfile),
                 "-t",
@@ -316,7 +326,7 @@ def write_evidence(
     payload = {
         "schema_version": 1,
         "repository": os.environ.get("GITHUB_REPOSITORY"),
-        "source_sha": os.environ.get("GITHUB_SHA"),
+        "source_sha": os.environ.get("SOURCE_SHA") or os.environ.get("GITHUB_SHA"),
         "source_tree": subprocess.run(
             ["git", "rev-parse", "HEAD^{tree}"],
             cwd=root,

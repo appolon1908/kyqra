@@ -6,9 +6,9 @@ WORKDIR /app
 COPY package*.json ./
 RUN npm install
 
-COPY . .
+COPY --chown=myuser:myuser . .
 
-RUN mkdir -p /app/storage && chown -R myuser:myuser /app
+RUN mkdir -p /app/storage && chown myuser:myuser /app/storage
 USER myuser
 
 EXPOSE 3000
