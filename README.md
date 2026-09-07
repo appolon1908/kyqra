@@ -1,19 +1,60 @@
-# Kyqra
+# Kyqra — legacy crawler repository
 
-Dockerized crawler/scraper repository for **kyqra.com**.
+> **Repository authority:** deprecated for new crawler development.
+>
+> The canonical Kyqra crawler implementation is now `appolon1908-hue/kyqra-crawler`.
+> This repository is retained for history and migration reference only. Do not create a
+> second production crawler API, queue, credential set, job ledger, Middleware contract,
+> or deployment from this repository.
 
-Deployment target: `37.27.128.39` (`10.40.0.2` private)
-Middleware target: `10.40.0.1` over private HTTPS. Kyqra never connects to Odoo or n8n directly.
+## Canonical architecture
 
-Services are separated into API intake, Redis scheduling, Crawlee/Playwright workers, and a durable SQLite outbox delivery worker. Existing crawling behavior remains available through `/api/v1/crawl`; new integrations should use `/api/v1/jobs`.
+```text
+Client / n8n
+    |
+    v
+Kong -> Middleware -> kyqra-crawler -> approved crawl targets
+                         |
+                         +-> signed/allowlisted result callback -> Middleware
+```
 
-Do not commit secrets. Copy `.env.example` to `.env` on the server and fill real credentials there.
+Middleware remains the cross-system write/control boundary. The crawler must not write
+directly to Odoo or other Codestra product databases.
 
-## Start
+## Migration status
+
+The existing source in this repository described a Dockerized crawler/scraper for
+`kyqra.com`, targeted at the provider host, with Crawlee, Playwright/Chromium, Redis,
+an API, dashboard and reverse proxy. The newer `kyqra-crawler` repository contains the
+substantive production-oriented implementation and is the authority for future fixes,
+contracts, tests and releases.
+
+No runtime traffic is moved by this documentation change. Any production cutover still
+requires contract/source parity, backup/restore evidence, queue drain, callback cutover,
+immutable deployment, read-back and rollback rehearsal.
+
+## Historical control-plane alignment
+
+PR #2 preserves the earlier tenant-scoped job API, Redis scheduling, Crawlee/Playwright
+worker, and SQLite outbox implementation for migration review. The legacy
+`/api/v1/crawl` and `/api/v1/jobs` routes are historical interfaces, not a new production
+API authority. New integrations and production fixes belong in `kyqra-crawler`.
+
+The associated [event model](docs/EVENT_MODEL.md),
+[middleware integration](docs/MIDDLEWARE_INTEGRATION.md),
+[retry and DLQ](docs/RETRY_DLQ.md), [security](docs/SECURITY.md), and
+[operations](docs/OPERATIONS.md) documents describe that historical implementation.
+The [deployment report](DEPLOYMENT_REPORT.md) records unverified activation blockers;
+merging the source does not authorize runtime deployment, live crawling, callback
+replay, secret provisioning, or downstream delivery.
+
+## Historical quick start
+
+The historical Compose source remains available for reference:
+
 ```bash
 docker compose up -d --build
 ```
 
-API requests require `X-API-Key`, `Idempotency-Key`, and optionally `X-Request-Id` / `X-Correlation-Id`. Tenant identities come from `TENANT_API_KEYS_JSON`. Prometheus metrics are at `/metrics`; crawler and middleware health are separated at `/api/v1/health`; admin operations are at `/admin/integration`.
-
-See [middleware integration](docs/MIDDLEWARE_INTEGRATION.md), [event model](docs/EVENT_MODEL.md), [retry and DLQ](docs/RETRY_DLQ.md), [security](docs/SECURITY.md), and [operations](docs/OPERATIONS.md).
+Do not commit secrets and do not treat this command as an approved production deployment
+procedure.

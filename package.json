@@ -8,7 +8,7 @@
     "worker:crawler": "node src/crawler-worker.js",
     "worker:outbox": "node src/outbox-worker.js",
     "test": "node --test",
-    "check": "for f in src/*.js test/*.js; do node --check \"$f\"; done"
+    "check": "set -eu; for f in src/*.js test/*.js; do node --check \"$f\"; done"
   },
   "dependencies": {
     "better-sqlite3": "^11.8.1",
