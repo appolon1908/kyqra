@@ -60,6 +60,7 @@ jobs:
       - name: Run repository-aware CI
         run: |
           set -Eeuo pipefail
+          python -m unittest discover -s scripts/ci/tests -p 'test_*.py' -v
           mkdir -p evidence
           python scripts/ci/validate_repository.py --root . --mode ci --branch "$SOURCE_BRANCH" --repository-class "$REPOSITORY_CLASS" --evidence evidence/required-ci.json
       - name: Upload CI evidence

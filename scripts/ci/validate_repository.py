@@ -259,7 +259,10 @@ def run_compose_checks(root: Path) -> None:
         env_example = path.parent / ".env.example"
         if env_example.is_file():
             command.extend(["--env-file", str(env_example)])
-        command.extend(["-f", str(path), "config", "--quiet"])
+        # Validate source structure and interpolation without reading runtime-only
+        # service env files. Runtime `compose up` still requires those files;
+        # consistency checks remain enabled and no secrets enter CI or evidence.
+        command.extend(["-f", str(path), "config", "--no-env-resolution", "--quiet"])
         run(command, cwd=path.parent, timeout=300)
 
 
@@ -275,7 +278,7 @@ def run_docker_builds(root: Path, mode: str) -> None:
                 "build",
                 "--pull=false",
                 "--label",
-                f"org.opencontainers.image.revision={os.environ.get('GITHUB_SHA', 'local')}",
+                f"org.opencontainers.image.revision={os.environ.get('SOURCE_SHA') or os.environ.get('GITHUB_SHA', 'local')}",
                 "-f",
                 str(dockerfile),
                 "-t",
@@ -316,7 +319,7 @@ def write_evidence(
     payload = {
         "schema_version": 1,
         "repository": os.environ.get("GITHUB_REPOSITORY"),
-        "source_sha": os.environ.get("GITHUB_SHA"),
+        "source_sha": os.environ.get("SOURCE_SHA") or os.environ.get("GITHUB_SHA"),
         "source_tree": subprocess.run(
             ["git", "rev-parse", "HEAD^{tree}"],
             cwd=root,

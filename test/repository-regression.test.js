@@ -54,3 +54,15 @@ test('deployment report distinguishes historical observations from activation au
   assert.match(report, /not current\s+production certification/);
   assert.match(report, /No runtime deployment/);
 });
+
+test('historical deployment cannot hide TypeScript errors behind stale output', () => {
+  const deployment = JSON.parse(readFileSync(new URL('deployment/kyqra-crawler/package.json', root), 'utf8'));
+  assert.equal(deployment.scripts.build, 'tsc');
+});
+
+test('historical Playwright dependency and browser image use the matching security patch', () => {
+  const deployment = JSON.parse(readFileSync(new URL('deployment/kyqra-crawler/package.json', root), 'utf8'));
+  const dockerfile = readFileSync(new URL('deployment/kyqra-crawler/Dockerfile', root), 'utf8');
+  assert.equal(deployment.dependencies.playwright, '1.55.1');
+  assert.match(dockerfile, /^FROM mcr\.microsoft\.com\/playwright:v1\.55\.1-noble\n/);
+});
